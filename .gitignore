@@ -1,0 +1,7 @@
+venv/*
+env.sh
+*.pyc
+launch.json
+*.log
+http_ca.crt
+oaas_products.log

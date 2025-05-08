@@ -1,12 +1,16 @@
 from io import BytesIO
 import time
+import zipfile
 from typing import Optional
-from fastapi import APIRouter, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Form, HTTPException, Query, UploadFile, Depends
 import httpx
+import io
 from app.product.openai_service import OpenAIService
 from app.product.utils import get_product_attribute_mapping, get_products
 from app.tracing import tracer
+from httpx import Timeout
 from app.product.schemas import (
+    DocumentRequest,
     DocumentInfo,
     DocumentResponse,
     ProductAttrData,
@@ -18,6 +22,7 @@ from app.product.schemas import (
     ProductUpdateResponse,
     ProductDeleteResponse,
     RecommendationsResponse,
+    InboundDocumentType,
 )
 from app.product.embeddings import (
     delete_all_embeddings_from_elasticsearch,
@@ -28,8 +33,16 @@ from app.product.embeddings import (
     delete_embeddings_from_elasticsearch,
     fetch_recommendations_from_elasticsearch,
 )
+from httpx import AsyncClient
+
+from app.product.utils import fetch_file_bytes, extract_images
 
 router = APIRouter()
+
+# Dependency to provide a single shared HTTPX AsyncClient
+async def get_http_client() -> httpx.AsyncClient:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        yield client
 
 @router.post("/bulk_insert/", response_model=BulkInsertResponse)
 async def bulk_insert_products(request: BulkProductCreate):
@@ -109,82 +122,76 @@ async def get_recommendations_by_query(request: ProductQuery):
         recommendations = await fetch_recommendations_from_elasticsearch_based_on_query(request.query)
         return RecommendationsResponse(recommendations=recommendations)
 
-@router.post("/fetch/productinfo/", response_model=RecommendationsResponse)
-async def fetch_productinfo(
-        file: Optional[UploadFile] = None,
-        file_url: Optional[str] = Form(None)
-    ):
-    start_time = time.time()
-    """
-    Fetch product info based on image.
-    """
-    with tracer.start_as_current_span("fetch_productinfo") as span:
-        open_ai_service = OpenAIService()
-        span.set_attribute("component", "document_extraction")
-        span.add_event("Start processing request")
+@router.post(
+    "/fetch/product/info/",
+    response_model=DocumentResponse,
+)
+async def fetch_product_info(
+    request: DocumentRequest,
+    client: AsyncClient = Depends(get_http_client),
+):
+    start_time = time.perf_counter()
 
-        image_bytes = None
-        try:
-            # Check if an uploaded file is provided
-            if file:
-                span.add_event("Uploaded file provided")
-                image_bytes = await file.read()
-                span.set_attribute("file.size", len(image_bytes))
-            # Otherwise, check if a file URL is provided
-            elif file_url:
-                span.add_event("File URL provided")
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(file_url)
-                    span.set_attribute("http.status_code", response.status_code)
-                    if response.status_code != 200:
-                        span.add_event("Failed to retrieve file from URL")
-                        raise HTTPException(status_code=400, detail="Unable to retrieve file from URL")
-                    image_bytes = response.content
-                    span.set_attribute("file.size", len(image_bytes))
-            else:
-                span.add_event("No file or URL provided")
-                raise HTTPException(status_code=400, detail="No file or file URL provided")
-        except Exception as e:
-            span.record_exception(e)
-            span.set_attribute("error", True)
-            raise e
+    if not request.products:
+        raise HTTPException(status_code=400, detail="No products provided")
 
-        # Ensure image_bytes is not empty
-        if not image_bytes:
-            span.add_event("Empty file content", {"error": True})
-            raise HTTPException(status_code=400, detail="Empty file content")
+    # Map tmp_code -> (bytes, type, filename)
+    products_file_map: Dict[str, Tuple[bytes, str, str]] = {}
 
-        # Initialize the S3 file service for saving the image
-        file_name = f"doc_{int(time.time())}.png"
-        span.set_attribute("s3.file_name", file_name)
+    # Attempt fetching for each product until one succeeds
+    for product in request.products:
+        for image in product.images:
+            try:
+                content, ctype, fname = await fetch_file_bytes(image.url, client)
+                products_file_map[product.tmp_code] = (content, ctype, fname)
+                break
+            except httpx.HTTPError:
+                continue
+        if product.tmp_code not in products_file_map:
+            # No valid URL for this product
+            continue
 
-        # Wrap file bytes in a BytesIO if file object is not available
-        if file is None:
-            file_obj = BytesIO(image_bytes)
-            file = UploadFile(filename=file_name, file=file_obj)
-            span.add_event("Wrapped file bytes into BytesIO object")
-
-        product_info = await open_ai_service.extract_product_info(image_bytes)
-        span.add_event("Scheduled S3 upload and document extraction tasks")
-
-
-        try:
-            doc_info = DocumentInfo(**product_info)
-            span.add_event("Converted extraction result to DocumentInfo model")
-        except Exception as e:
-            span.record_exception(e)
-            span.set_attribute("error", True)
-            raise HTTPException(status_code=500, detail="Invalid document information format")
-
-        time_taken = time.time() - start_time
-        span.set_attribute("time_taken", round(time_taken, 2))
-        span.add_event("Completed processing", {"duration": round(time_taken, 2)})
-
-        return DocumentResponse(
-            success=True,
-            data=doc_info,
-            time_taken=round(time_taken, 2)
+    if not products_file_map:
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to fetch any file from provided URLs for all products"
         )
 
-        # recommendations = await fetch_recommendations_from_elasticsearch_based_on_query(request.query)
-        # return RecommendationsResponse(recommendations=recommendations)
+    # Extract images per product
+    image_tasks: Dict[str, Tuple[List[bytes], List[str]]] = {}
+    for tmp_code, (content, ctype, fname) in products_file_map.items():
+        images, names = await extract_images(content, ctype)
+        image_tasks[tmp_code] = (images, names, ctype)
+
+    if not image_tasks:
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to extract any images from provided files"
+        )
+
+    # Call AI service
+    open_ai_service = OpenAIService()
+    final_data: List[DocumentInfo] = []
+    for tmp_code, (images, names, ctype) in image_tasks.items():
+        try:
+            raw = await open_ai_service.extract_product_info(images)
+            info = DocumentInfo(
+                **raw,
+                tmp_code=tmp_code,
+                file_name=names,
+                file_type=ctype
+            )
+            final_data.append(info)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Extraction failed for {tmp_code}: {e}"
+            )
+
+    duration = round(time.perf_counter() - start_time, 2)
+    return DocumentResponse(
+        user=request.user,
+        success=True,
+        data=final_data,
+        time_taken=duration,
+    )

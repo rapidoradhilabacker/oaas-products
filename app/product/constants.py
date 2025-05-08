@@ -1,7 +1,7 @@
 
 from os import getenv
 
-ELASTICSEARCH_URL: str = getenv('ELASTICSEARCH_URL', 'http://localhost:9200')
+ELASTICSEARCH_URL: str = getenv('ELASTICSEARCH_URL', 'https://localhost:9200')
 ELASTICSEARCH_API_KEY = getenv('ELASTICSEARCH_API_KEY')
 ELASTICSEARCH_USERNAME: str = getenv('ELASTICSEARCH_USERNAME', 'elastic')
 ELASTICSEARCH_PASSWORD: str = getenv('ELASTICSEARCH_PASSWORD', 'changeme')

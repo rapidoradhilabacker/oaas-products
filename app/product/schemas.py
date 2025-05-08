@@ -1,6 +1,6 @@
 from pydantic import BaseModel
-from typing import Any, Optional
-
+from typing import Any, Optional, List
+from enum import Enum
 from app.product.models import ProductAttributeModel, ProductModel
 
 class BulkProductCreate(BaseModel):
@@ -39,14 +39,48 @@ class ProductAttrData(BaseModel):
     products: list[Any]
     attribute_mapping: dict[str, list[Any]]
 
+class InboundDocumentType(str, Enum):
+    PDF = "application/pdf"
+    IMAGE = "image/jpeg"
+    ZIP = "application/zip"
+    JSON = "application/json"
+    PNG = "image/png"
+    BINARY = "binary/octet-stream"
+
+class User(BaseModel):
+    mobile_no: str  
+    company_name: Optional[str] = ""
+    
 class DocumentInfo(BaseModel):
+    tmp_code: str
     product_name: str
-    product_code: str
     short_description: str
     long_description: str
+    file_type: InboundDocumentType
+    file_name: list[str]
 
 class DocumentResponse(BaseModel):
+    user: User
     success: bool
-    data: Optional[DocumentInfo] = None
+    data:  list[DocumentInfo] = []
     error: Optional[str] = None
     time_taken: float
+
+class DocumentListResponse(BaseModel):
+    success: bool
+    data: Optional[List[DocumentInfo]] = None
+    error: Optional[str] = None
+    time_taken: float
+
+class Image(BaseModel):
+    image_type: InboundDocumentType
+    url: str
+
+class Product(BaseModel):
+    tmp_code: str
+    images: list[Image]
+
+class DocumentRequest(BaseModel):
+    user: User
+    products: list[Product]
+    tenant: str = 'placeorder'

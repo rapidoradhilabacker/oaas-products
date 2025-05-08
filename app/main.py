@@ -4,6 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.product.routers import router as products_router
 from app.database import closeConnection, connectToDatabase, initialize_db_logger
 from app.constants import API_DOC_DESCRIPTION
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Lifespan event handler for startup and shutdown
 @asynccontextmanager

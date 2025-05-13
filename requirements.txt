@@ -11,6 +11,7 @@ backoff==2.2.1
 certifi==2025.1.31
 charset-normalizer==3.4.1
 click==8.1.8
+coverage==7.8.0
 Deprecated==1.2.18
 distro==1.9.0
 elastic-transport==8.17.1
@@ -27,6 +28,7 @@ httpx==0.28.1
 huggingface-hub==0.30.2
 idna==3.10
 importlib-metadata==6.0.1
+iniconfig==2.1.0
 iso8601==2.1.0
 Jinja2==3.1.6
 jiter==0.9.0
@@ -67,12 +69,16 @@ opentelemetry-util-http==0.38b0
 packaging==24.2
 pandas==2.2.3
 pillow==11.2.1
+pluggy==1.5.0
 propcache==0.3.1
 protobuf==4.25.6
 pydantic==2.11.3
 pydantic-settings==2.8.1
 pydantic_core==2.33.1
 pypika-tortoise==0.5.0
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.1.0
 python-multipart==0.0.20

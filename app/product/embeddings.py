@@ -1,7 +1,6 @@
 import math
 import numpy as np
 from app.product.models import ProductModel
-from app.product.constants import ELASTICSEARCH_INDEX
 from app.product.schemas import ProductAttrData
 from app.product.utils import get_text_for_embedding
 from app.product.config import es, model, asy_es

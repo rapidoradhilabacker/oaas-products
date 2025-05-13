@@ -86,6 +86,7 @@ class MultiFolderResponse(BaseModel):
     user: User
     success: bool
     data: List[FolderResponse] = []
+    s3_response: dict[str, Any] = {}
     error: Optional[str] = None
     time_taken: float
 
@@ -109,10 +110,20 @@ class DocumentRequest(BaseModel):
     tenant: str = 'placeorder'
 
 class ZipImageInfo(BaseModel):
-    image_type: str
     url: str
 
 class ZipProductRequest(BaseModel):
     user: User
     products: ZipImageInfo
     tenant: str = 'placeorder'
+
+class S3UploadRequest(BaseModel):
+    user: User
+    zip_folder: ZipImageInfo
+    tenant: str = 'placeorder'
+
+class S3UploadResponse(BaseModel):
+    success: bool
+    data: dict[str, Any]
+    error: Optional[str] = None
+    time_taken: float

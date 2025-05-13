@@ -1,13 +1,10 @@
-from io import BytesIO
 import time
-import zipfile
 from typing import Optional, AsyncGenerator
-from fastapi import APIRouter, Form, HTTPException, Query, UploadFile, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends
 import httpx
-import io
-import os
+import asyncio
 from app.product.openai_service import OpenAIService
-from app.product.utils import get_product_attribute_mapping, get_products
+from app.product.utils import get_product_attribute_mapping, get_products, fetch_file_bytes, extract_images, process_product_zip
 from app.tracing import tracer
 from httpx import Timeout
 from app.product.schemas import (
@@ -23,11 +20,10 @@ from app.product.schemas import (
     ProductUpdateResponse,
     ProductDeleteResponse,
     RecommendationsResponse,
-    InboundDocumentType,
     ZipProductRequest,
-    FolderDocumentInfo,
-    FolderResponse,
     MultiFolderResponse,
+    FolderResponse,
+    FolderDocumentInfo,
 )
 from app.product.embeddings import (
     delete_all_embeddings_from_elasticsearch,
@@ -39,8 +35,7 @@ from app.product.embeddings import (
     fetch_recommendations_from_elasticsearch,
 )
 from httpx import AsyncClient
-
-from app.product.utils import fetch_file_bytes, extract_images
+from app.s3 import S3Service
 
 router = APIRouter()
 
@@ -129,7 +124,7 @@ async def get_recommendations_by_query(request: ProductQuery):
 
 @router.post(
     "/fetch/product/info/",
-    response_model=DocumentResponse,
+    response_model=MultiFolderResponse,
 )
 async def fetch_product_info(
     request: DocumentRequest,
@@ -177,17 +172,24 @@ async def fetch_product_info(
 
     # Call AI service
     open_ai_service = OpenAIService()
-    final_data: list[DocumentInfo] = []
+    folder_responses: list[FolderResponse] = []
+    
     for tmp_code, (images, names, ctype) in image_tasks.items():
         try:
             raw = await open_ai_service.extract_product_info(images)
-            info = DocumentInfo(
-                **raw,
+            folder_info = FolderDocumentInfo(
                 tmp_code=tmp_code,
-                file_name=names,
-                file_type=ctype
+                product_name=raw['product_name'],
+                short_description=raw['short_description'],
+                long_description=raw['long_description'],
+                file_type=ctype,
+                file_name=names
             )
-            final_data.append(info)
+            folder_response = FolderResponse(
+                folder=tmp_code,
+                products=[folder_info]
+            )
+            folder_responses.append(folder_response)
         except Exception as e:
             raise HTTPException(
                 status_code=500,
@@ -195,11 +197,22 @@ async def fetch_product_info(
             )
 
     duration = round(time.perf_counter() - start_time, 2)
-    return DocumentResponse(
+    
+    if not folder_responses:
+        return MultiFolderResponse(
+            user=request.user,
+            success=False,
+            error="Failed to process any products",
+            time_taken=duration,
+            s3_response={}
+        )
+
+    return MultiFolderResponse(
         user=request.user,
         success=True,
-        data=final_data,
+        data=folder_responses,
         time_taken=duration,
+        s3_response={}
     )
 
 @router.post(
@@ -213,66 +226,23 @@ async def fetch_product_info_from_zip(
     start_time = time.perf_counter()
 
     try:
-        # Fetch the zip file
+        # Fetch the zip file first
         response = await client.get(request.products.url)
         response.raise_for_status()
         zip_content = response.content
 
-        # Create a BytesIO object from the zip content
-        zip_buffer = BytesIO(zip_content)
-        
-        # Open the zip file
-        folder_responses: list[FolderResponse] = []
-        
-        with zipfile.ZipFile(zip_buffer) as zip_ref:
-            # Group files by their parent folders
-            folder_files: dict[str, list[str]] = {}
-            for file_path in zip_ref.namelist():
-                if file_path.endswith('/'):  # Skip directories
-                    continue
-                parent_folder = os.path.dirname(file_path).split('/')[-1]
-                if not parent_folder:  # Skip files in root
-                    continue
-                if parent_folder not in folder_files:
-                    folder_files[parent_folder] = []
-                folder_files[parent_folder].append(file_path)
+        # Process zip file and upload to S3 concurrently
+        async with S3Service() as s3_service:
+            s3_task = asyncio.create_task(
+                s3_service.upload_to_s3(request.user, request.products, request.tenant)
+            )
+            openai_service = OpenAIService()
+            process_task = asyncio.create_task(
+                process_product_zip(zip_content, openai_service)
+            )
 
-            # Process each folder
-            open_ai_service = OpenAIService()
-            for folder_name, files in folder_files.items():
-                images = []
-                file_names = []
-                
-                # Extract images from the folder
-                for file_path in files:
-                    if any(file_path.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png']):
-                        image_data = zip_ref.read(file_path)
-                        images.append(image_data)
-                        file_names.append(os.path.basename(file_path))
-                
-                if not images:
-                    continue
-
-                # Get product info using OpenAI
-                try:
-                    product_info = await open_ai_service.extract_product_info(images)
-                    folder_info = FolderDocumentInfo(
-                        tmp_code=folder_name,
-                        product_name=product_info['product_name'],
-                        short_description=product_info['short_description'],
-                        long_description=product_info['long_description'],
-                        file_type="image/jpeg",  # Default to JPEG, can be enhanced to detect actual type
-                        file_name=file_names
-                    )
-                    
-                    folder_response = FolderResponse(
-                        folder=folder_name,
-                        products=[folder_info]
-                    )
-                    folder_responses.append(folder_response)
-                except Exception as e:
-                    print(f"Error processing folder {folder_name}: {str(e)}")
-                    continue
+            # Wait for both tasks to complete
+            s3_response, folder_responses = await asyncio.gather(s3_task, process_task)
 
         duration = round(time.perf_counter() - start_time, 2)
         
@@ -281,14 +251,16 @@ async def fetch_product_info_from_zip(
                 user=request.user,
                 success=False,
                 error="No valid product folders found in the zip file",
-                time_taken=duration
+                time_taken=duration,
+                s3_response=s3_response
             )
 
         return MultiFolderResponse(
             user=request.user,
             success=True,
             data=folder_responses,
-            time_taken=duration
+            time_taken=duration,
+            s3_response=s3_response
         )
 
     except httpx.HTTPError as e:
@@ -296,13 +268,8 @@ async def fetch_product_info_from_zip(
             status_code=400,
             detail=f"Failed to fetch zip file: {str(e)}"
         )
-    except zipfile.BadZipFile:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid zip file format"
-        )
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error processing zip file: {str(e)}"
+            detail=f"Error processing request: {str(e)}"
         )

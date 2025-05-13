@@ -1,7 +1,6 @@
 from elasticsearch import AsyncElasticsearch, Elasticsearch
 from sentence_transformers import SentenceTransformer
 
-from app.product.constants import ELASTICSEARCH_CERT_PATH, ELASTICSEARCH_PASSWORD, ELASTICSEARCH_USERNAME, ELASTICSEARCH_URL
 
 
 # asy_es = AsyncElasticsearch(

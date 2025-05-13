@@ -66,6 +66,29 @@ class DocumentResponse(BaseModel):
     error: Optional[str] = None
     time_taken: float
 
+# --- Schemas ---
+class FolderRequest(BaseModel):
+    path: str  # Absolute or relative path to the product folder
+
+class FolderDocumentInfo(BaseModel):
+    tmp_code: str
+    product_name: str
+    short_description: str
+    long_description: str
+    file_type: str  # MIME type or custom InboundDocumentType name
+    file_name: List[str]
+
+class FolderResponse(BaseModel):
+    folder: str
+    products: List[FolderDocumentInfo]
+
+class MultiFolderResponse(BaseModel):
+    user: User
+    success: bool
+    data: List[FolderResponse] = []
+    error: Optional[str] = None
+    time_taken: float
+
 class DocumentListResponse(BaseModel):
     success: bool
     data: Optional[List[DocumentInfo]] = None
@@ -83,4 +106,13 @@ class Product(BaseModel):
 class DocumentRequest(BaseModel):
     user: User
     products: list[Product]
+    tenant: str = 'placeorder'
+
+class ZipImageInfo(BaseModel):
+    image_type: str
+    url: str
+
+class ZipProductRequest(BaseModel):
+    user: User
+    products: ZipImageInfo
     tenant: str = 'placeorder'

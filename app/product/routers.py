@@ -1,15 +1,17 @@
 from io import BytesIO
 import time
 import zipfile
-from typing import Optional
+from typing import Optional, AsyncGenerator
 from fastapi import APIRouter, Form, HTTPException, Query, UploadFile, Depends
 import httpx
 import io
+import os
 from app.product.openai_service import OpenAIService
 from app.product.utils import get_product_attribute_mapping, get_products
 from app.tracing import tracer
 from httpx import Timeout
 from app.product.schemas import (
+    BulkInsertResponse,
     DocumentRequest,
     DocumentInfo,
     DocumentResponse,
@@ -18,11 +20,14 @@ from app.product.schemas import (
     ProductDelete,
     ProductQuery,
     ProductUpdate,
-    BulkInsertResponse,
     ProductUpdateResponse,
     ProductDeleteResponse,
     RecommendationsResponse,
     InboundDocumentType,
+    ZipProductRequest,
+    FolderDocumentInfo,
+    FolderResponse,
+    MultiFolderResponse,
 )
 from app.product.embeddings import (
     delete_all_embeddings_from_elasticsearch,
@@ -40,8 +45,8 @@ from app.product.utils import fetch_file_bytes, extract_images
 router = APIRouter()
 
 # Dependency to provide a single shared HTTPX AsyncClient
-async def get_http_client() -> httpx.AsyncClient:
-    async with httpx.AsyncClient(timeout=30.0) as client:
+async def get_http_client() -> AsyncGenerator[AsyncClient, None]:
+    async with AsyncClient(timeout=30.0) as client:
         yield client
 
 @router.post("/bulk_insert/", response_model=BulkInsertResponse)
@@ -136,7 +141,7 @@ async def fetch_product_info(
         raise HTTPException(status_code=400, detail="No products provided")
 
     # Map tmp_code -> (bytes, type, filename)
-    products_file_map: Dict[str, Tuple[bytes, str, str]] = {}
+    products_file_map: dict[str, tuple[bytes, str, str]] = {}
 
     # Attempt fetching for each product until one succeeds
     for product in request.products:
@@ -158,9 +163,10 @@ async def fetch_product_info(
         )
 
     # Extract images per product
-    image_tasks: Dict[str, Tuple[List[bytes], List[str]]] = {}
+    image_tasks: dict[str, tuple[list[bytes], list[str]]] = {}
     for tmp_code, (content, ctype, fname) in products_file_map.items():
         images, names = await extract_images(content, ctype)
+        names = names or [fname]
         image_tasks[tmp_code] = (images, names, ctype)
 
     if not image_tasks:
@@ -171,7 +177,7 @@ async def fetch_product_info(
 
     # Call AI service
     open_ai_service = OpenAIService()
-    final_data: List[DocumentInfo] = []
+    final_data: list[DocumentInfo] = []
     for tmp_code, (images, names, ctype) in image_tasks.items():
         try:
             raw = await open_ai_service.extract_product_info(images)
@@ -195,3 +201,108 @@ async def fetch_product_info(
         data=final_data,
         time_taken=duration,
     )
+
+@router.post(
+    "/fetch/products/info/zip/",
+    response_model=MultiFolderResponse,
+)
+async def fetch_product_info_from_zip(
+    request: ZipProductRequest,
+    client: AsyncClient = Depends(get_http_client),
+):
+    start_time = time.perf_counter()
+
+    try:
+        # Fetch the zip file
+        response = await client.get(request.products.url)
+        response.raise_for_status()
+        zip_content = response.content
+
+        # Create a BytesIO object from the zip content
+        zip_buffer = BytesIO(zip_content)
+        
+        # Open the zip file
+        folder_responses: list[FolderResponse] = []
+        
+        with zipfile.ZipFile(zip_buffer) as zip_ref:
+            # Group files by their parent folders
+            folder_files: dict[str, list[str]] = {}
+            for file_path in zip_ref.namelist():
+                if file_path.endswith('/'):  # Skip directories
+                    continue
+                parent_folder = os.path.dirname(file_path).split('/')[-1]
+                if not parent_folder:  # Skip files in root
+                    continue
+                if parent_folder not in folder_files:
+                    folder_files[parent_folder] = []
+                folder_files[parent_folder].append(file_path)
+
+            # Process each folder
+            open_ai_service = OpenAIService()
+            for folder_name, files in folder_files.items():
+                images = []
+                file_names = []
+                
+                # Extract images from the folder
+                for file_path in files:
+                    if any(file_path.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png']):
+                        image_data = zip_ref.read(file_path)
+                        images.append(image_data)
+                        file_names.append(os.path.basename(file_path))
+                
+                if not images:
+                    continue
+
+                # Get product info using OpenAI
+                try:
+                    product_info = await open_ai_service.extract_product_info(images)
+                    folder_info = FolderDocumentInfo(
+                        tmp_code=folder_name,
+                        product_name=product_info['product_name'],
+                        short_description=product_info['short_description'],
+                        long_description=product_info['long_description'],
+                        file_type="image/jpeg",  # Default to JPEG, can be enhanced to detect actual type
+                        file_name=file_names
+                    )
+                    
+                    folder_response = FolderResponse(
+                        folder=folder_name,
+                        products=[folder_info]
+                    )
+                    folder_responses.append(folder_response)
+                except Exception as e:
+                    print(f"Error processing folder {folder_name}: {str(e)}")
+                    continue
+
+        duration = round(time.perf_counter() - start_time, 2)
+        
+        if not folder_responses:
+            return MultiFolderResponse(
+                user=request.user,
+                success=False,
+                error="No valid product folders found in the zip file",
+                time_taken=duration
+            )
+
+        return MultiFolderResponse(
+            user=request.user,
+            success=True,
+            data=folder_responses,
+            time_taken=duration
+        )
+
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to fetch zip file: {str(e)}"
+        )
+    except zipfile.BadZipFile:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid zip file format"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing zip file: {str(e)}"
+        )

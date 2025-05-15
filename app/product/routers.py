@@ -131,15 +131,17 @@ async def fetch_product_info(
     client: AsyncClient = Depends(get_http_client),
 ):
     start_time = time.perf_counter()
-
+    s3_service = S3Service()    
     if not request.products:
         raise HTTPException(status_code=400, detail="No products provided")
 
     # Map tmp_code -> (bytes, type, filename)
     products_file_map: dict[str, tuple[bytes, str, str]] = {}
-
     # Attempt fetching for each product until one succeeds
+    s3_urls: dict[str, list[str]] = {}
     for product in request.products:
+        s3_response = await s3_service.upload_to_s3_file(request.user, product, request.tenant)
+        s3_urls[product.tmp_code] = s3_response.get('s3_urls', {}).get(product.tmp_code, [])
         for image in product.images:
             try:
                 content, ctype, fname = await fetch_file_bytes(image.url, client)
@@ -204,7 +206,7 @@ async def fetch_product_info(
             success=False,
             error="Failed to process any products",
             time_taken=duration,
-            s3_response={}
+            s3_response=s3_urls
         )
 
     return MultiFolderResponse(
@@ -212,7 +214,7 @@ async def fetch_product_info(
         success=True,
         data=folder_responses,
         time_taken=duration,
-        s3_response={}
+        s3_response=s3_urls
     )
 
 @router.post(
@@ -234,8 +236,9 @@ async def fetch_product_info_from_zip(
         # Process zip file and upload to S3 concurrently
         async with S3Service() as s3_service:
             s3_task = asyncio.create_task(
-                s3_service.upload_to_s3(request.user, request.products, request.tenant)
+                s3_service.upload_to_s3_zip(request.user, request.products, request.tenant)
             )
+            
             openai_service = OpenAIService()
             process_task = asyncio.create_task(
                 process_product_zip(zip_content, openai_service)
@@ -243,6 +246,7 @@ async def fetch_product_info_from_zip(
 
             # Wait for both tasks to complete
             s3_response, folder_responses = await asyncio.gather(s3_task, process_task)
+            s3_urls = s3_response.get('s3_urls', {})
 
         duration = round(time.perf_counter() - start_time, 2)
         
@@ -252,7 +256,7 @@ async def fetch_product_info_from_zip(
                 success=False,
                 error="No valid product folders found in the zip file",
                 time_taken=duration,
-                s3_response=s3_response
+                s3_response=s3_urls
             )
 
         return MultiFolderResponse(
@@ -260,7 +264,7 @@ async def fetch_product_info_from_zip(
             success=True,
             data=folder_responses,
             time_taken=duration,
-            s3_response=s3_response
+            s3_response=s3_urls
         )
 
     except httpx.HTTPError as e:

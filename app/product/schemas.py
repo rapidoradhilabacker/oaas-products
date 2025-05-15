@@ -117,9 +117,14 @@ class ZipProductRequest(BaseModel):
     products: ZipImageInfo
     tenant: str = 'placeorder'
 
-class S3UploadRequest(BaseModel):
+class S3UploadZipRequest(BaseModel):
     user: User
     zip_folder: ZipImageInfo
+    tenant: str = 'placeorder'
+
+class S3UploadFileRequest(BaseModel):
+    user: User
+    product: Product
     tenant: str = 'placeorder'
 
 class S3UploadResponse(BaseModel):

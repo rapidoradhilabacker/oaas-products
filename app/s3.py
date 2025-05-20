@@ -6,19 +6,22 @@ from app.product.schemas import (
     S3UploadZipRequest,
     Product,
     ZipImageInfo,
-    Image   
+    Image,
+    S3UploadFileBytesRequest,
+    ProductBytes   
 )
 from app.product.openai_service import OpenAIService
 from app.tracing import tracer
 from app.product.settings import settings
-
+from httpx import Timeout
 
 class S3Service:
     """Service for handling S3-related operations"""
     
     def __init__(self):
-        self.s3_upload_url_zip = f"{settings.s3_zip_folder_url}/s3/upload/oaas/folder"
-        self.s3_upload_url_file = f"{settings.s3_zip_folder_url}/s3/upload/oaas/files"
+        self.s3_upload_url_zip = f"{settings.s3_base_url}/s3/upload/oaas/folder"
+        self.s3_upload_url_file = f"{settings.s3_base_url}/s3/upload/oaas/files"
+        self.s3_upload_url_file_bytes = f"{settings.s3_base_url}/s3/upload/oaas/files/v2"
         self.client = httpx.AsyncClient(timeout=30.0)
         self.openai_service = OpenAIService()
 
@@ -95,6 +98,37 @@ class S3Service:
             except httpx.HTTPError as e:
                 raise HTTPException(
                     status_code=400,
+                    detail=f"Failed to upload to S3: {str(e)}"
+                )
+            finally:
+                await self.client.aclose()
+
+    async def upload_to_s3_file_bytes(self, user: User, products: list[ProductBytes], tenant: str) -> dict:
+        with tracer.start_as_current_span("upload_to_s3") as span:
+            s3_request = S3UploadFileBytesRequest(
+                user=user,
+                products=products,
+                tenant=tenant
+            )
+
+            try:
+                response = await self.client.post(
+                    self.s3_upload_url_file_bytes,
+                    json=s3_request.model_dump(),
+                    headers={"accept": "application/json", "Content-Type": "application/json"},
+                    timeout=Timeout(30.0)
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to upload to S3: {str(e)}"
+                )
+            
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
                     detail=f"Failed to upload to S3: {str(e)}"
                 )
             finally:

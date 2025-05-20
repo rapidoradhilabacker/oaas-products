@@ -77,6 +77,7 @@ async def extract_images(
                 return images, image_names
         except BadZipFile:
             raise HTTPException(status_code=400, detail="Invalid ZIP archive")
+            
     # Non-zip: return raw bytes
     return [file_bytes], []
 

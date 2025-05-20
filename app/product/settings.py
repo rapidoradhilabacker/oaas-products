@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     elasticsearch_cert_path: str = Field(default="http_ca.crt", env="ELASTICSEARCH_CERT_PATH")
 
     # S3 Settings
-    s3_zip_folder_url: str = Field(default="https://devg4.rapidor.co", env="S3_ZIP_FOLDER_URL")
+    s3_base_url: str = Field(default="https://devg4.rapidor.co", env="S3_BASE_URL")
 
     class Config:
         case_sensitive = False

@@ -52,12 +52,12 @@ class User(BaseModel):
     company_name: Optional[str] = ""
     
 class DocumentInfo(BaseModel):
-    tmp_code: str
+    product_code: str
     product_name: str
     short_description: str
     long_description: str
     file_type: InboundDocumentType
-    file_name: list[str]
+    s3_urls: list[str]
 
 class DocumentResponse(BaseModel):
     user: User
@@ -71,7 +71,7 @@ class FolderRequest(BaseModel):
     path: str  # Absolute or relative path to the product folder
 
 class FolderDocumentInfo(BaseModel):
-    tmp_code: str
+    product_code: str
     product_name: str
     short_description: str
     long_description: str
@@ -100,8 +100,17 @@ class Image(BaseModel):
     image_type: InboundDocumentType
     url: str
 
+class CombinedProductsImages(BaseModel):
+    products_count: int
+    images: list[Image]
+
+class CombinedProductRequest(BaseModel):
+    user: User
+    products: CombinedProductsImages
+    tenant: str = 'placeorder'
+
 class Product(BaseModel):
-    tmp_code: str
+    product_code: str
     images: list[Image]
 
 class DocumentRequest(BaseModel):
@@ -132,3 +141,17 @@ class S3UploadResponse(BaseModel):
     data: dict[str, Any]
     error: Optional[str] = None
     time_taken: float
+
+class ImageBytes(BaseModel):
+    image_name: str
+    image_type: InboundDocumentType
+    image_bytes: str
+
+class ProductBytes(BaseModel):
+    product_code: str
+    images: list[ImageBytes]
+
+class S3UploadFileBytesRequest(BaseModel):
+    user: User
+    products: list[ProductBytes]
+    tenant: str = 'placeorder'

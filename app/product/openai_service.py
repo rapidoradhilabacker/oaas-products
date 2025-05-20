@@ -26,8 +26,13 @@ class OpenAIService():
                 return 'gif'
             if len(img_bytes) >= 12 and img_bytes.startswith(b'RIFF') and img_bytes[8:12] == b'WEBP':
                 return 'webp'
+            if len(img_bytes) >= 12 and img_bytes.startswith(b'BM'):
+                return 'bmp'
         
-        raise ValueError("Unsupported image format")
+        # If we can't detect the format, default to jpeg as a fallback
+        # This is a common format and OpenAI API may still process it
+        print("Warning: Could not detect image format, defaulting to jpeg")
+        return 'jpeg'
 
     async def extract_product_info(self, image_bytes: list[bytes]) -> dict:
         with tracer.start_as_current_span('extract_product_info') as span:
@@ -113,3 +118,122 @@ class OpenAIService():
                 **json_template,
                 **{k: v for k, v in extracted_data.items() if k in json_template}
             }
+
+    async def extract_combined_product_info(self, image_bytes: list[bytes], products_count: int, file_names: list[str]) -> list[dict]:
+        with tracer.start_as_current_span('extract_combined_product_info') as span:
+            json_template = {
+                "product_code": "",
+                "product_name": "",
+                "short_description": "",
+                "long_description": "",
+                "file_type": "",
+                "file_names": []
+            }
+
+            # Construct the instruction string
+            instruction = f"""
+            You are an expert at analyzing product images and extracting relevant information. 
+            I'm providing you with {products_count} different products in a combined set of images.
+            
+            Your task is to identify each distinct product and extract the following details for EACH product:
+            
+            1. Product Code: If visible, extract the product code or SKU from the packaging.
+               - If not visible, generate a plausible code based on the product name and characteristics.
+               - Format should be: [COMPANY_PREFIX]-[CATEGORY]-[PRODUCT]-[NUMBER], e.g., "ADH-RED-APPLE-001"
+            
+            2. Product Name: Identify the primary product name.
+            
+            3. Short Description: Provide a concise, single-sentence summary describing the product's main function.
+            
+            4. Long Description: Provide a more detailed description in exactly three sentences covering features, benefits, and usage.
+            
+            5. For each product, identify which images belong to it. Multiple images may show the same product from different angles.
+            
+            6. File Names: Use these exact file names in your response:
+               {json.dumps(file_names)}
+               - Each product should include the appropriate file name(s) in its file_name array.
+            
+            Use the following JSON template for each product:
+            {json.dumps(json_template, indent=4)}
+            
+            Return EXACTLY {products_count} products in a JSON array, with each product having all the fields from the template.
+            
+            Important instructions:
+            * Ensure you identify and separate EXACTLY {products_count} distinct products.
+            * For each product, include all relevant information and associate the correct images.
+            * For each product, include the EXACT file_name(s) from the provided list in the file_name array.
+            * If multiple images show the same product, group them together.
+            * Return ONLY the valid JSON output without any additional text.
+            """
+
+            # Prepare message content with all images
+            content_parts = [{"type": "text", "text": instruction}]
+            
+            # Add all images to the request
+            for img_bytes in image_bytes:
+                image_format = self.detect_image_format(img_bytes)
+                b64_image = base64.b64encode(img_bytes).decode("utf-8")
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/{image_format};base64,{b64_image}",
+                        "detail": "high"
+                    }
+                })
+
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{
+                    "role": "user",
+                    "content": content_parts
+                }],
+                max_tokens=2000
+            )
+
+            # Parse JSON response
+            content = response.choices[0].message.content.strip()
+            try:
+                extracted_data = json.loads(content)
+                if not isinstance(extracted_data, list):
+                    extracted_data = [extracted_data]
+                
+                # Ensure we have exactly the requested number of products
+                if len(extracted_data) != products_count:
+                    print(f"Warning: Expected {products_count} products but got {len(extracted_data)}")
+                
+                # Ensure each product has all required fields
+                result = []
+                for i, product in enumerate(extracted_data):
+                    product_data = {**json_template}
+                    for key in json_template:
+                        if key in product:
+                            product_data[key] = product[key]
+                    result.append(product_data)
+                
+                return result
+            except json.JSONDecodeError:
+                # Try to extract JSON from the text
+                start_idx = content.find('[')
+                end_idx = content.rfind(']') + 1
+                if start_idx >= 0 and end_idx > start_idx:
+                    try:
+                        extracted_data = json.loads(content[start_idx:end_idx])
+                        if not isinstance(extracted_data, list):
+                            extracted_data = [extracted_data]
+                        
+                        # Process each product
+                        result = []
+                        for product in extracted_data:
+                            product_data = {**json_template}
+                            for key in json_template:
+                                if key in product:
+                                    product_data[key] = product[key]
+                            result.append(product_data)
+                        
+                        return result
+                    except json.JSONDecodeError:
+                        # If still failing, return template data
+                        return [{**json_template} for _ in range(products_count)]
+                else:
+                    # Return template data if no JSON found
+                    return [{**json_template} for _ in range(products_count)]

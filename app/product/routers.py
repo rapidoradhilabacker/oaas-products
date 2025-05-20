@@ -24,6 +24,12 @@ from app.product.schemas import (
     MultiFolderResponse,
     FolderResponse,
     FolderDocumentInfo,
+    CombinedProductRequest,
+    InboundDocumentType,
+    Product,
+    ProductBytes,
+    ImageBytes,
+    Image
 )
 from app.product.embeddings import (
     delete_all_embeddings_from_elasticsearch,
@@ -36,6 +42,7 @@ from app.product.embeddings import (
 )
 from httpx import AsyncClient
 from app.s3 import S3Service
+import base64
 
 router = APIRouter()
 
@@ -272,6 +279,125 @@ async def fetch_product_info_from_zip(
             status_code=400,
             detail=f"Failed to fetch zip file: {str(e)}"
         )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing request: {str(e)}"
+        )
+
+@router.post(
+    "/fetch/combined/products/info/",
+    response_model=DocumentResponse,
+)
+async def fetch_info_from_combined_products(
+    request: CombinedProductRequest,
+    client: AsyncClient = Depends(get_http_client),
+):
+    """
+    Extract information from combined product images.
+    """
+    start_time = time.perf_counter()
+    
+    try:
+        # Validate products count
+        products_count = request.products.products_count
+        if products_count <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Products count must be greater than 0"
+            )
+        
+        # Fetch all images
+        images_data = []
+        file_names = []
+        
+        for image in request.products.images:
+            try:
+                content, content_type, filename = await fetch_file_bytes(image.url, client)
+                if image.image_type.lower() == InboundDocumentType.ZIP:
+                    images, names = await extract_images(content, image.image_type)
+                    images_data.extend(images)
+                    file_names.extend(names)
+                else:
+                    images_data.append(content)
+                    file_names.append(filename)
+            except Exception as e:
+                print(f"Failed to fetch image {image.url}: {str(e)}")
+                continue
+        
+        
+        if not images_data:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to fetch any images from provided URLs"
+            )
+        
+        file_name_map = dict(zip(file_names, images_data))
+        # Extract product information using OpenAI first
+        openai_service = OpenAIService()
+        product_info_list = await openai_service.extract_combined_product_info(
+            images_data, products_count, file_names
+        )
+        
+
+        s3_product_urls_map = {} 
+        s3_products = []       
+        async with S3Service() as s3_service:
+            for product_info in product_info_list:
+                code = product_info.get("product_code")
+                files = product_info.get("file_names")
+                
+                images = []
+                for file in files:
+                    try:
+                        image_content = file_name_map.get(file)
+                        if not image_content:
+                            continue
+                        base64_bytes = base64.b64encode(image_content).decode('utf-8')
+                        images.append(ImageBytes(image_name=file, image_type=InboundDocumentType.IMAGE, image_bytes=base64_bytes))
+                    except Exception as e:
+                        print(f"Failed to upload image to S3: {str(e)}")
+                
+                s3_products.append(ProductBytes(product_code=code, images=images))
+            try:
+                s3_response = {}
+                if s3_products:
+                    s3_response = await s3_service.upload_to_s3_file_bytes(request.user, s3_products, request.tenant)
+                    s3_product_urls_map = s3_response.get('s3_urls', {})
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to upload to S3: {str(e)}"
+                )
+            
+        document_info_list = []
+        for product_info in product_info_list:
+            # Generate a unique product code if not provided
+            if not product_info.get("product_code"):
+                product_info["product_code"] = f"PROD-{len(document_info_list) + 1}"
+                            
+            # Create document info
+            doc_info = DocumentInfo(
+                product_code=product_info["product_code"],
+                product_name=product_info["product_name"],
+                short_description=product_info["short_description"],
+                long_description=product_info["long_description"],
+                file_type=InboundDocumentType.IMAGE,
+                s3_urls=s3_product_urls_map.get(product_info["product_code"], [])
+            )
+            document_info_list.append(doc_info)
+        
+        duration = round(time.perf_counter() - start_time, 2)
+        
+        return DocumentResponse(
+            user=request.user,
+            success=True,
+            data=document_info_list,
+            time_taken=duration
+        )
+        
+    except HTTPException as e:
+        raise e
     except Exception as e:
         raise HTTPException(
             status_code=500,

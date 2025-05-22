@@ -1,6 +1,6 @@
 import json
 import base64
-from typing import Dict
+from typing import Dict, Optional
 from app.config import OPEN_AI_SETTINGS
 from openai import OpenAI
 from app.tracing import tracer
@@ -28,6 +28,9 @@ class OpenAIService():
                 return 'webp'
             if len(img_bytes) >= 12 and img_bytes.startswith(b'BM'):
                 return 'bmp'
+            # identify pdf 
+            if len(img_bytes) >= 4 and img_bytes.startswith(b'%PDF'):
+                return 'pdf'
         
         # If we can't detect the format, default to jpeg as a fallback
         # This is a common format and OpenAI API may still process it
@@ -89,7 +92,7 @@ class OpenAIService():
                 b64_image = base64.b64encode(img_bytes).decode("utf-8")
                 content_parts.append({
                     "type": "image_url",
-                    "image_url": {
+                    "image_url": {  # type: ignore
                         "url": f"data:image/{image_format};base64,{b64_image}",
                         "detail": "high"
                     }
@@ -175,7 +178,7 @@ class OpenAIService():
                 b64_image = base64.b64encode(img_bytes).decode("utf-8")
                 content_parts.append({
                     "type": "image_url",
-                    "image_url": {
+                    "image_url": {  # type: ignore
                         "url": f"data:image/{image_format};base64,{b64_image}",
                         "detail": "high"
                     }
@@ -237,3 +240,124 @@ class OpenAIService():
                 else:
                     # Return template data if no JSON found
                     return [{**json_template} for _ in range(products_count)]
+
+    async def extract_combined_product_info_from_invoice(self, company_name: Optional[str], image_bytes: list[bytes], file_names: list[str]) -> list[dict]:
+        with tracer.start_as_current_span('extract_combined_product_info_from_invoice') as span:
+            json_template = {
+                "product_code": "",
+                "product_name": "",
+                "short_description": "",
+                "long_description": "",
+                "file_type": "",
+                "file_names": [],
+                "price": 0.0
+            }
+
+            # Construct the instruction string
+            instruction = f"""
+            You are an expert at analyzing invoice documents and extracting product information. 
+            I'm providing you with an invoice that contains information about different products.
+            
+            Your task is to identify each distinct product from the invoice and extract the following details for EACH product:
+            
+            1. Product Code: Extract the product code, SKU, or item number from the invoice.
+               - If not visible, generate a plausible code based on the product name.
+               - Format should be: [COMPANY_PREFIX]-[PRODUCT]-[NUMBER], e.g., "ADH-LAXMI-BHOG-ATTA-05-KG" (For the product LAXMI BHOG ATTA 05 KG and company name ADHIL STORES)
+               - Company prefix should be extracted from the invoice or use {company_name or ""} if not visible.
+            
+            2. Product Name: Extract the product name or description from the invoice line items.
+            
+            3. Short Description: Provide a concise, single-sentence summary describing the product based on information in the invoice.
+            
+            4. Long Description: Provide a more detailed description in exactly three sentences based on the information available in the invoice.
+            
+            5. Price: Extract the price for each product as a numeric value (e.g., 19.99).
+               - This is critical information that must be extracted from the invoice.
+               - Do not include currency symbols in the price value.
+               - If multiple prices are shown (like unit price and total price), prefer the unit price.
+            
+            6. File Names: Use these exact file names in your response:
+               {json.dumps(file_names)}
+               - Each product should include the appropriate file name(s) in its file_name array.
+            
+            Use the following JSON template for each product:
+            {json.dumps(json_template, indent=4)}
+            
+            Return each product having all the fields from the template.
+            
+            Important instructions:
+            * Focus on extracting information from the invoice structure - look for line items, product tables, or itemized lists.
+            * Pay special attention to extracting accurate price information for each product.
+            * Ensure you identify and separate each distinct product.
+            * For each product, include all relevant information from the invoice.
+            * For each product, include the EXACT file_name(s) from the provided list in the file_name array.
+            * Return ONLY the valid JSON output without any additional text.
+            """
+
+            # Prepare message content with all images
+            content_parts = [{"type": "text", "text": instruction}]
+            
+            # Add all images to the request
+            for img_bytes in image_bytes:
+                image_format = self.detect_image_format(img_bytes)
+                b64_image = base64.b64encode(img_bytes).decode("utf-8")
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {  # type: ignore
+                        "url": f"data:image/{image_format};base64,{b64_image}",
+                        "detail": "high"
+                    }
+                })
+
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{
+                    "role": "user",
+                    "content": content_parts
+                }],
+                max_tokens=2000
+            )
+
+            # Parse JSON response
+            content = response.choices[0].message.content.strip()
+            try:
+                extracted_data = json.loads(content)
+                if not isinstance(extracted_data, list):
+                    extracted_data = [extracted_data]
+                                
+                # Ensure each product has all required fields
+                result = []
+                for i, product in enumerate(extracted_data):
+                    product_data = {**json_template}
+                    for key in json_template:
+                        if key in product:
+                            product_data[key] = product[key]
+                    result.append(product_data)
+                
+                return result
+            except json.JSONDecodeError:
+                # Try to extract JSON from the text
+                start_idx = content.find('[')
+                end_idx = content.rfind(']') + 1
+                if start_idx >= 0 and end_idx > start_idx:
+                    try:
+                        extracted_data = json.loads(content[start_idx:end_idx])
+                        if not isinstance(extracted_data, list):
+                            extracted_data = [extracted_data]
+                        
+                        # Process each product
+                        result = []
+                        for product in extracted_data:
+                            product_data = {**json_template}
+                            for key in json_template:
+                                if key in product:
+                                    product_data[key] = product[key]
+                            result.append(product_data)
+                        
+                        return result
+                    except json.JSONDecodeError:
+                        # If still failing, return template data
+                        return [{**json_template} for _ in range(len(image_bytes))]
+                else:
+                    # Return template data if no JSON found
+                    return [{**json_template} for _ in range(len(image_bytes))]

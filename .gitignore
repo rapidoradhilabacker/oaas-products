@@ -8,3 +8,4 @@ oaas_products.log
 .env
 run.sh  
 ondc_log
+deploy.sh

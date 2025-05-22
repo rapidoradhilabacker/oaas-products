@@ -58,6 +58,7 @@ class DocumentInfo(BaseModel):
     long_description: str
     file_type: InboundDocumentType
     s3_urls: list[str]
+    price: float = 0.0
 
 class DocumentResponse(BaseModel):
     user: User

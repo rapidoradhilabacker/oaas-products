@@ -148,15 +148,15 @@ async def fetch_product_info(
     s3_urls: dict[str, list[str]] = {}
     for product in request.products:
         s3_response = await s3_service.upload_to_s3_file(request.user, product, request.tenant)
-        s3_urls[product.tmp_code] = s3_response.get('s3_urls', {}).get(product.tmp_code, [])
+        s3_urls[product.product_code] = s3_response.get('s3_urls', {}).get(product.product_code, [])
         for image in product.images:
             try:
                 content, ctype, fname = await fetch_file_bytes(image.url, client)
-                products_file_map[product.tmp_code] = (content, ctype, fname)
+                products_file_map[product.product_code] = (content, ctype, fname)
                 break
             except httpx.HTTPError:
                 continue
-        if product.tmp_code not in products_file_map:
+        if product.product_code not in products_file_map:
             # No valid URL for this product
             continue
 
@@ -167,7 +167,7 @@ async def fetch_product_info(
         )
 
     # Extract images per product
-    image_tasks: dict[str, tuple[list[bytes], list[str]]] = {}
+    image_tasks: dict[str, tuple[list[bytes], list[str], str]] = {}
     for tmp_code, (content, ctype, fname) in products_file_map.items():
         images, names = await extract_images(content, ctype)
         names = names or [fname]
@@ -187,7 +187,7 @@ async def fetch_product_info(
         try:
             raw = await open_ai_service.extract_product_info(images)
             folder_info = FolderDocumentInfo(
-                tmp_code=tmp_code,
+                product_code=tmp_code,
                 product_name=raw['product_name'],
                 short_description=raw['short_description'],
                 long_description=raw['long_description'],
@@ -315,8 +315,8 @@ async def fetch_info_from_combined_products(
             try:
                 content, content_type, filename = await fetch_file_bytes(image.url, client)
                 if image.image_type.lower() == InboundDocumentType.ZIP:
-                    images, names = await extract_images(content, image.image_type)
-                    images_data.extend(images)
+                    ext_images, names = await extract_images(content, image.image_type)
+                    images_data.extend(ext_images)
                     file_names.extend(names)
                 else:
                     images_data.append(content)
@@ -347,7 +347,10 @@ async def fetch_info_from_combined_products(
                 code = product_info.get("product_code")
                 files = product_info.get("file_names")
                 
-                images = []
+                if not code or not files:
+                    continue
+                
+                images: list[ImageBytes] = []
                 for file in files:
                     try:
                         image_content = file_name_map.get(file)
@@ -370,7 +373,7 @@ async def fetch_info_from_combined_products(
                     detail=f"Failed to upload to S3: {str(e)}"
                 )
             
-        document_info_list = []
+        document_info_list: list[DocumentInfo] = []
         for product_info in product_info_list:
             # Generate a unique product code if not provided
             if not product_info.get("product_code"):
@@ -396,6 +399,84 @@ async def fetch_info_from_combined_products(
             time_taken=duration
         )
         
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing request: {str(e)}"
+        )
+
+@router.post("/fetch/combined/products/info/from/invoice", response_model=DocumentResponse)
+async def fetch_info_from_invoice(
+    request: CombinedProductRequest,
+    client: AsyncClient = Depends(get_http_client),
+):
+    """
+    Extract product information from invoice images or PDFs.
+    This endpoint specializes in extracting product details including price information from invoices.
+    """
+    try:
+        with tracer.start_as_current_span("fetch_info_from_invoice") as span:
+            start_time = time.perf_counter()
+                        
+            # Fetch all images
+            images_data = []
+            file_names = []
+            
+            for image in request.products.images:
+                try:
+                    content, content_type, filename = await fetch_file_bytes(image.url, client)
+                    images, names = await extract_images(content, image.image_type)
+                    images_data.extend(images)
+                    file_names.extend(names)
+                except Exception as e:
+                    print(f"Failed to fetch image {image.url}: {str(e)}")
+                    continue
+            
+            
+            if not images_data:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Failed to fetch any images from provided URLs"
+                )
+            
+            file_name_map = dict(zip(file_names, images_data))
+            # Extract product information using OpenAI first
+            openai_service = OpenAIService()
+            product_info_list = await openai_service.extract_combined_product_info_from_invoice(
+                request.user.company_name, images_data, file_names
+            )
+            
+
+            s3_product_urls_map: dict[str, list[str]] = {} 
+            document_info_list: list[DocumentInfo] = []
+            for product_info in product_info_list:
+                # Generate a unique product code if not provided
+                if not product_info.get("product_code"):
+                    product_info["product_code"] = f"PROD-{len(document_info_list) + 1}"
+                                
+                # Create document info
+                doc_info = DocumentInfo(
+                    product_code=product_info["product_code"],
+                    product_name=product_info["product_name"],
+                    short_description=product_info["short_description"],
+                    long_description=product_info["long_description"],
+                    file_type=InboundDocumentType.IMAGE,
+                    s3_urls=s3_product_urls_map.get(product_info["product_code"], []),
+                    price=float(product_info.get("price", 0.0))
+                )
+                document_info_list.append(doc_info)
+            
+            duration = round(time.perf_counter() - start_time, 2)
+            
+            return DocumentResponse(
+                user=request.user,
+                success=True,
+                data=document_info_list,
+                time_taken=duration
+            )
+            
     except HTTPException as e:
         raise e
     except Exception as e:

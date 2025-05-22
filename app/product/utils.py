@@ -12,6 +12,8 @@ from io import BytesIO
 from fastapi import HTTPException
 import os
 import zipfile
+from pdf2image import convert_from_bytes
+import asyncio
 
 async def get_products(product_codes: list[str]) -> list[ProductModel]:
     """
@@ -60,9 +62,13 @@ async def extract_images(
     file_bytes: bytes, content_type: str
 ) -> tuple[list[bytes], list[str]]:
     """
-    If zip archive, extract all image files; otherwise, return single file.
+    If ZIP archive, extract all image files. If PDF, convert each page to JPEG.
+    Otherwise, treat as a single image file.
+    Returns a tuple of (list of image bytes, list of filenames).
     """
-    if content_type.lower() == InboundDocumentType.ZIP:
+    ctype = content_type.lower()
+    # Handle ZIP archives
+    if ctype == InboundDocumentType.ZIP:
         try:
             with ZipFile(BytesIO(file_bytes)) as zf:
                 image_names = [f for f in zf.namelist() if f.lower().endswith((
@@ -77,9 +83,36 @@ async def extract_images(
                 return images, image_names
         except BadZipFile:
             raise HTTPException(status_code=400, detail="Invalid ZIP archive")
-            
-    # Non-zip: return raw bytes
-    return [file_bytes], []
+
+    # Handle PDF documents
+    if ctype == InboundDocumentType.PDF:
+        try:
+            # Convert each PDF page to a PIL Image
+            pages = await asyncio.get_event_loop().run_in_executor(
+                None, convert_from_bytes, file_bytes
+            )
+            if not pages:
+                raise HTTPException(
+                    status_code=400,
+                    detail="PDF contains no pages or conversion failed"
+                )
+            images = []
+            names = []
+            for idx, page in enumerate(pages, start=1):
+                buf = BytesIO()
+                # Save page as JPEG
+                page.save(buf, format="JPEG")
+                images.append(buf.getvalue())
+                names.append(f"page_{idx}.jpg")
+            return images, names
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to convert PDF to images: {e}"
+            )
+
+    # Fallback: treat as single image file
+    return [file_bytes], ["upload"]
 
 async def process_product_zip(
     zip_content: bytes,
@@ -125,7 +158,7 @@ async def process_product_zip(
                     try:
                         product_info = await open_ai_service.extract_product_info(images)
                         folder_info = FolderDocumentInfo(
-                            tmp_code=folder_name,
+                            product_code=folder_name,
                             product_name=product_info['product_name'],
                             short_description=product_info['short_description'],
                             long_description=product_info['long_description'],

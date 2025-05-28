@@ -116,7 +116,7 @@ class S3Service:
                     self.s3_upload_url_file_bytes,
                     json=s3_request.model_dump(),
                     headers={"accept": "application/json", "Content-Type": "application/json"},
-                    timeout=Timeout(30.0)
+                    timeout=Timeout(60.0)
                 )
                 response.raise_for_status()
                 return response.json()

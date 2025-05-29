@@ -29,7 +29,7 @@ from app.product.schemas import (
     Product,
     ProductBytes,
     ImageBytes,
-    Image
+    Image,
 )
 from app.product.embeddings import (
     delete_all_embeddings_from_elasticsearch,
@@ -42,7 +42,9 @@ from app.product.embeddings import (
 )
 from httpx import AsyncClient
 from app.s3 import S3Service
+from app.auth import get_current_user
 import base64
+from app.schemas import Trace
 
 router = APIRouter()
 
@@ -52,7 +54,7 @@ async def get_http_client() -> AsyncGenerator[AsyncClient, None]:
         yield client
 
 @router.post("/bulk_insert/", response_model=BulkInsertResponse)
-async def bulk_insert_products(request: BulkProductCreate):
+async def bulk_insert_products(request: BulkProductCreate, trace: Trace = Depends(get_current_user)):
     """
     Bulk insert products into Elasticsearch.
     """
@@ -69,7 +71,7 @@ async def bulk_insert_products(request: BulkProductCreate):
         return BulkInsertResponse(message="Bulk insert successful")
 
 @router.put("/update_product/", response_model=ProductUpdateResponse)
-async def update_product(request: ProductUpdate):
+async def update_product(request: ProductUpdate, trace: Trace = Depends(get_current_user)):
     """
     Update a product's details in Elasticsearch.
     """
@@ -91,7 +93,7 @@ async def delete_product(product_id: str):
         return ProductDeleteResponse(message="Product deleted successfully")
 
 @router.delete("/delete_products/", response_model=ProductDeleteResponse)
-async def delete_products(request: ProductDelete):
+async def delete_products(request: ProductDelete, trace: Trace = Depends(get_current_user)):
     """
     Delete multiple products from Elasticsearch.
     """
@@ -101,7 +103,7 @@ async def delete_products(request: ProductDelete):
         return ProductDeleteResponse(message="Products deleted successfully")
 
 @router.delete("/delete_all_products/", response_model=ProductDeleteResponse)
-async def delete_all_products(request: ProductDelete):
+async def delete_all_products(trace: Trace = Depends(get_current_user)):
     """
     Delete multiple products from Elasticsearch.
     """
@@ -112,7 +114,7 @@ async def delete_all_products(request: ProductDelete):
 
 
 @router.get("/recommendations/{product_id}", response_model=RecommendationsResponse)
-async def get_recommendations(product_id: str, top_k: int = Query(5, ge=1)):
+async def get_recommendations(product_id: str, top_k: int = Query(5, ge=1), trace: Trace = Depends(get_current_user)):
     """
     Fetch product recommendations based on a product ID.
     """
@@ -121,7 +123,7 @@ async def get_recommendations(product_id: str, top_k: int = Query(5, ge=1)):
         return RecommendationsResponse(recommendations=recommendations)
 
 @router.post("/recommendations/query/", response_model=RecommendationsResponse)
-async def get_recommendations_by_query(request: ProductQuery):
+async def get_recommendations_by_query(request: ProductQuery, trace: Trace = Depends(get_current_user)):
     """
     Fetch product recommendations based on a query.
     """
@@ -135,6 +137,7 @@ async def get_recommendations_by_query(request: ProductQuery):
 )
 async def fetch_product_info(
     request: DocumentRequest,
+    trace: Trace = Depends(get_current_user),
     client: AsyncClient = Depends(get_http_client),
 ):
     start_time = time.perf_counter()
@@ -230,6 +233,7 @@ async def fetch_product_info(
 )
 async def fetch_product_info_from_zip(
     request: ZipProductRequest,
+    trace: Trace = Depends(get_current_user),
     client: AsyncClient = Depends(get_http_client),
 ):
     start_time = time.perf_counter()
@@ -291,6 +295,7 @@ async def fetch_product_info_from_zip(
 )
 async def fetch_info_from_combined_products(
     request: CombinedProductRequest,
+    trace: Trace = Depends(get_current_user),
     client: AsyncClient = Depends(get_http_client),
 ):
     """
@@ -410,6 +415,7 @@ async def fetch_info_from_combined_products(
 @router.post("/fetch/combined/products/info/from/invoice", response_model=DocumentResponse)
 async def fetch_info_from_invoice(
     request: CombinedProductRequest,
+    trace: Trace = Depends(get_current_user),
     client: AsyncClient = Depends(get_http_client),
 ):
     """

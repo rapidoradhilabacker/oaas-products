@@ -1,6 +1,6 @@
 from enum import Enum
 from urllib.parse import quote, quote_plus
-from pydantic import Field
+from pydantic import Field, validator
 from pydantic_settings import BaseSettings
 
 class DatabaseSettings(BaseSettings):
@@ -79,6 +79,41 @@ class OpenAiSettings(BaseSettings):
     class Config:
         env_prefix = "OPENAI_"
 
+class AuthSettings(BaseSettings):
+    """
+    Configuration settings for authentication.
+
+    Attributes:
+        secret_key (str): The secret key for JWT.
+        algorithm (str): The algorithm for JWT.
+        service_id (str): The service id for authentication.
+    """
+    secret_key: str = Field(default='')
+    algorithm: str = Field(default='')
+    service_id: str = Field(default='')
+
+    @validator('secret_key')
+    def validate_secret_key(cls, v):
+        if not v:
+            raise ValueError('JWT secret key is required')
+        return v
+
+    @validator('algorithm')
+    def validate_algorithm(cls, v):
+        if not v:
+            raise ValueError('JWT algorithm is required')
+        return v
+
+    @validator('service_id')
+    def validate_service_id(cls, v):
+        if not v:
+            raise ValueError('Service ID is required')
+        return v
+
+    class Config:
+        env_prefix = "AUTH_"
+
 # Instantiate the log settings
 LOG_SETTINGS = LogSettings()
 OPEN_AI_SETTINGS = OpenAiSettings()
+AUTH_SETTINGS = AuthSettings()

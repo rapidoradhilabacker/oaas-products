@@ -22,8 +22,18 @@ class S3Service:
         self.s3_upload_url_zip = f"{settings.s3_base_url}/s3/upload/oaas/folder"
         self.s3_upload_url_file = f"{settings.s3_base_url}/s3/upload/oaas/files"
         self.s3_upload_url_file_bytes = f"{settings.s3_base_url}/s3/upload/oaas/files/v2"
+        self.s3_auth_token = settings.s3_auth_token
         self.client = httpx.AsyncClient(timeout=30.0)
         self.openai_service = OpenAIService()
+
+    def get_s3_headers(self):
+        return {
+            "Authorization": f"Bearer {self.s3_auth_token}",
+            "x-request-id": "3e434",
+            "x-app-id": "3434",
+            "x-device-id": "dsd",
+            "x-business-id": "bef46c45-14ec-4856-a3ef-4fa6f00f57ca"
+        }
 
     async def upload_to_s3_file(self, user: User, product: Product, tenant: str) -> dict:
         """
@@ -41,7 +51,7 @@ class S3Service:
             s3_request = S3UploadFileRequest(
                 user=user,
                 product=Product(
-                    tmp_code=product.tmp_code,
+                    product_code=product.product_code,
                     images=product.images
                 ),
                 tenant=tenant
@@ -51,7 +61,7 @@ class S3Service:
                 response = await self.client.post(
                     self.s3_upload_url_file,
                     json=s3_request.model_dump(),
-                    headers={"accept": "application/json", "Content-Type": "application/json"}
+                    headers=self.get_s3_headers()
                 )
                 response.raise_for_status()
                 return response.json()
@@ -63,7 +73,7 @@ class S3Service:
             finally:
                 await self.client.aclose()
 
-    async def upload_to_s3_zip(self, user: User, zip_info: Product, tenant: str) -> dict:
+    async def upload_to_s3_zip(self, user: User, zip_info: ZipImageInfo, tenant: str) -> dict:
         """
         Upload zip file to S3 asynchronously
         
@@ -91,7 +101,7 @@ class S3Service:
                 response = await self.client.post(
                     self.s3_upload_url_zip,
                     json=s3_request.model_dump(),
-                    headers={"accept": "application/json", "Content-Type": "application/json"}
+                    headers=self.get_s3_headers()
                 )
                 response.raise_for_status()
                 return response.json()
@@ -115,7 +125,7 @@ class S3Service:
                 response = await self.client.post(
                     self.s3_upload_url_file_bytes,
                     json=s3_request.model_dump(),
-                    headers={"accept": "application/json", "Content-Type": "application/json"},
+                    headers=self.get_s3_headers(),
                     timeout=Timeout(60.0)
                 )
                 response.raise_for_status()

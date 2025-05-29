@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from app.product.routers import router as products_router
+from app.auth_api import auth_router
 from app.database import closeConnection, connectToDatabase, initialize_db_logger
 from app.constants import API_DOC_DESCRIPTION
 from dotenv import load_dotenv
@@ -41,3 +42,5 @@ app.summary = "Fast API project for product recommendation"
 
 # Include routers
 app.include_router(products_router, prefix="/products", tags=["products"])
+
+app.include_router(auth_router, prefix="/auth", tags=["auth"])

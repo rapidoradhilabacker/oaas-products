@@ -3,6 +3,8 @@ from typing import Any, Optional, List
 from enum import Enum
 from app.product.models import ProductAttributeModel, ProductModel
 
+INVOICE = "INVOICE"
+
 class BulkProductCreate(BaseModel):
     codes: list[str] = []
 

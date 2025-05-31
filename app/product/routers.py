@@ -45,6 +45,7 @@ from app.s3 import S3Service
 from app.auth import get_current_user
 import base64
 from app.schemas import Trace
+from app.product.schemas import INVOICE
 
 router = APIRouter()
 
@@ -362,7 +363,7 @@ async def fetch_info_from_combined_products(
                         if not image_content:
                             continue
                         base64_bytes = base64.b64encode(image_content).decode('utf-8')
-                        images.append(ImageBytes(image_name=file, image_type=InboundDocumentType.IMAGE, image_bytes=base64_bytes))
+                        images.append(ImageBytes(image_name=file, image_type=InboundDocumentType.IMAGE, image_bytes=base64_bytes))  # type: ignore
                     except Exception as e:
                         print(f"Failed to upload image to S3: {str(e)}")
                 
@@ -454,8 +455,31 @@ async def fetch_info_from_invoice(
                 request.user.company_name, images_data, file_names
             )
             
-
             s3_product_urls_map: dict[str, list[str]] = {} 
+            s3_products: list[ProductBytes] = []       
+            async with S3Service() as s3_service:
+                try:                    
+                    invoice_images: list[ImageBytes] = []
+                    for file in file_names:
+                        try:
+                            image_content = file_name_map.get(file)
+                            if not image_content:
+                                continue
+                            base64_bytes = base64.b64encode(image_content).decode('utf-8')
+                            invoice_images.append(ImageBytes(image_name=file, image_type=InboundDocumentType.IMAGE, image_bytes=base64_bytes))  # type: ignore
+                        except Exception as e:
+                            print(f"Failed to upload image to S3: {str(e)}")
+                    
+                    s3_products.append(ProductBytes(product_code=INVOICE, images=invoice_images))
+                    if s3_products:
+                        s3_response = await s3_service.upload_to_s3_file_bytes(request.user, s3_products, request.tenant)
+                        s3_product_urls_map = s3_response.get('s3_urls', {})
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to upload to S3: {str(e)}"
+                    )
+            
             document_info_list: list[DocumentInfo] = []
             for product_info in product_info_list:
                 # Generate a unique product code if not provided
@@ -469,7 +493,7 @@ async def fetch_info_from_invoice(
                     short_description=product_info["short_description"],
                     long_description=product_info["long_description"],
                     file_type=InboundDocumentType.IMAGE,
-                    s3_urls=s3_product_urls_map.get(product_info["product_code"], []),
+                    s3_urls=s3_product_urls_map.get(INVOICE, []),
                     price=float(product_info.get("price", 0.0))
                 )
                 document_info_list.append(doc_info)
